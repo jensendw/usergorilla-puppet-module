@@ -1,0 +1,101 @@
+#!/usr/bin/env ruby
+require 'pp'
+$:.push('/etc/puppet/scripts/lib')
+
+
+require 'enc'
+# we must have a hostname argument
+host =  ARGV.pop
+raise "USAGE: #{$0} HOSTNAME" if host == nil
+facts = Enc.get_facts(:host => host)
+if ( facts.nil? or facts.empty? )
+  log.error("#{__FILE__} cannot retrieve facts for #{host}")
+  exit 1
+end
+server = "http://usergorilla"
+
+users_json = Enc.get_http_json("#{server}/users/list.json")
+environments_json = Enc.get_http_json("#{server}/environments/list.json")
+sshkeys_json = Enc.get_http_json("#{server}/sshkeys/list.json")
+roles_json = Enc.get_http_json("#{server}/roles/list.json")
+uids_json = Enc.get_http_json("#{server}/uids/list.json")
+
+def get_users(environment,users_json,environments_json)
+  userid_array = []
+  users_array = []
+  environments_json.each do |user|
+    if environment =~ /dev|stage|production/
+      userid_array.push user["user_id"] if user["environment"] == environment
+    else
+      userid_array.push user["user_id"] if user["environment"] == "production"
+    end
+
+  end
+  users_json.each do |user|
+    if userid_array.include? (user["id"])
+      users_array.push user
+    end
+  end
+  return users_array
+end
+
+def get_sshkeys(user_id,sshkeys_json)
+  sshkey_array = []
+  sshkeys_json.each do |sshkey|
+    sshkey_array.push sshkey if sshkey["user_id"] == user_id
+  end
+  sshkey_array
+end
+
+def get_role_users(role,roles_json)
+  role_userid_array = []
+  roles_json.each do |r|
+    role_userid_array.push r["user_id"] if r["role"] == role
+  end
+  role_userid_array
+end
+
+def userid_to_userdata(user_id,users_json)
+  user_array = []
+  users_json.each do |user|
+    user_array.push user if user["user_id"] == user_id
+  end
+  user_array
+end
+
+def get_uid(user_id,uids_json)
+  uids_json.each do |uid|
+    return uid["uid"] if uid["user_id"] == user_id
+  end
+end
+
+
+temp_users_array = []
+
+users_environment_array = get_users(facts['ha_env'],users_json,environments_json)
+role_userids_array = get_role_users(facts['ha_role'],roles_json)
+
+users_json.each do |user|
+  temp_users_array.push user if role_userids_array.include? (user["id"])
+end
+
+
+classes = {"usergorilla" => nil}
+classes["usergorilla::users"] = {}
+classes["usergorilla::keys"] = {}
+classes["usergorilla::users"]["users"] = {}
+classes["usergorilla::keys"]["keys"] = {}
+
+temp_users_array.concat(users_environment_array).uniq.each do |user|
+  classes["usergorilla::users"]["users"].merge!({user["username"] => {"groups" => user["ingroups"], "shell" => user["shell"], "password" => user["password"].chomp!, "name" => user["username"], "comment" => user["realname"], "ensure" => user["ensure"], "membership" => "minimum", "uid" => get_uid(user["id"],uids_json), "managehome" => "true"  } })
+  get_sshkeys(user["id"], sshkeys_json).each do |key|
+    classes["usergorilla::keys"]["keys"].merge!({key["id"] => {"user" => user["username"], "ensure" => "present", "type" => key["keytype"], "key" => key["key"]} })
+  end
+end
+
+
+Enc.yamldump({ "classes" => classes })
+
+
+
+exit 0
